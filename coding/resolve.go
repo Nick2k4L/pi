@@ -573,6 +573,10 @@ func buildFallbackModel(providerModels []*ai.Model, modelID string) *ai.Model {
 	clone := *base
 	clone.ID = modelID
 	clone.Name = modelID
+	if clone.Provider == "openai" {
+		clone.Api = ai.APIOpenAICompletions
+		clone.Reasoning = false
+	}
 	return &clone
 }
 

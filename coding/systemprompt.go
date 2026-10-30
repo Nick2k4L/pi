@@ -3,6 +3,8 @@ package coding
 import (
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -74,6 +76,16 @@ type BuildSystemPromptOptions struct {
 	ReadmePath   string
 	DocsPath     string
 	ExamplesPath string
+	// VerifyDocPaths, when true, makes the docs section advertise only what
+	// actually exists on disk: the Main documentation line only when the README
+	// exists, the Additional docs / Examples lines only when their directories
+	// exist, and each "When asked about" topic only when at least one of its
+	// referenced files (or directories) does. When nothing exists, the docs
+	// section is omitted entirely. Upstream pi always advertises the full
+	// documentation set regardless of the filesystem; the coding session
+	// enables this so the prompt stays truthful when the binary runs from a
+	// checkout that does not carry pi's docs.
+	VerifyDocPaths bool
 }
 
 // defaultPromptPreamble is the default prompt's untagged opening section.
@@ -232,7 +244,12 @@ func BuildSystemPromptSections(input BuildSystemPromptOptions) (ai.SystemSection
 		}
 		set("tools", tools+"\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.")
 		set("rules", buildRules(declaredTools, opts.ToolGuidelines, opts.PromptGuidelines))
-		set("docs", docsSection(opts))
+		// Upstream always sets a docs section; the verified builder returns
+		// "" when nothing exists, and an empty docs section is omitted rather
+		// than rendered as an empty tag.
+		if docs := docsSection(opts); docs != "" {
+			set("docs", docs)
+		}
 	}
 
 	if opts.AppendSystemPrompt != "" {
@@ -278,7 +295,40 @@ func BuildSystemPromptSections(input BuildSystemPromptOptions) (ai.SystemSection
 	return sections, nil
 }
 
+// docsTopic is one "When asked about" entry of the docs section: the topic and
+// the files (or directories) it references, relative to the docs or examples
+// root.
+type docsTopic struct {
+	topic string
+	paths []string
+}
+
+// docsTopics is the default prompt's topic list, in upstream order, with the
+// file references spelled exactly as the prompt renders them.
+var docsTopics = []docsTopic{
+	{"extensions", []string{"docs/extensions.md", "examples/extensions/"}},
+	{"themes", []string{"docs/themes.md"}},
+	{"skills", []string{"docs/skills.md"}},
+	{"prompt templates", []string{"docs/prompt-templates.md"}},
+	{"TUI components", []string{"docs/tui.md"}},
+	{"keybindings", []string{"docs/keybindings.md"}},
+	{"SDK integrations", []string{"docs/sdk.md"}},
+	{"custom providers", []string{"docs/custom-provider.md"}},
+	{"adding models", []string{"docs/models.md"}},
+	{"pi packages", []string{"docs/packages.md"}},
+	{"environment variables", []string{"docs/environment-variables.md"}},
+	{"MCP servers", []string{"docs/mcp.md"}},
+	{"codemode scripts and non-LLM models such as classifiers and image models", []string{"docs/codemode.md"}},
+}
+
 // docsSection is the default prompt's pi documentation section.
+//
+// Unverified (the upstream behavior) it renders the full documentation set
+// byte for byte, paths interpolated. Verified (opts.VerifyDocPaths) it renders
+// the same shape but advertises only what exists: the Main documentation line
+// needs the README, each doc-directory line needs its directory, and each
+// topic needs at least one of its referenced files or directories; an empty
+// result omits the whole section.
 func docsSection(opts BuildSystemPromptOptions) string {
 	readmePath := opts.ReadmePath
 	if readmePath == "" {
@@ -292,7 +342,8 @@ func docsSection(opts BuildSystemPromptOptions) string {
 	if examplesPath == "" {
 		examplesPath = ExamplesPath()
 	}
-	return `Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
+	if !opts.VerifyDocPaths {
+		return `Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
 - Main documentation: ` + readmePath + `
 - Additional docs: ` + docsPath + `
 - Examples: ` + examplesPath + ` (extensions, custom tools, SDK)
@@ -300,6 +351,70 @@ func docsSection(opts BuildSystemPromptOptions) string {
 - When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)
 - When working on pi topics, read the docs and examples, and follow .md cross-references before implementing
 - Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)`
+	}
+
+	resolveRef := func(ref string) string {
+		if strings.HasPrefix(ref, "examples/") {
+			return filepath.Join(examplesPath, ref[len("examples/"):])
+		}
+		return filepath.Join(docsPath, ref[len("docs/"):])
+	}
+	docsDir := isDir(docsPath)
+	examplesDir := isDir(examplesPath)
+
+	var lines []string
+	if fileExists(readmePath) {
+		lines = append(lines, "- Main documentation: "+readmePath)
+	}
+	if docsDir {
+		lines = append(lines, "- Additional docs: "+docsPath)
+	}
+	if examplesDir {
+		lines = append(lines, "- Examples: "+examplesPath+" (extensions, custom tools, SDK)")
+	}
+	if docsDir {
+		lines = append(lines, "- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory")
+	}
+	topics := make([]string, 0, len(docsTopics))
+	for _, topic := range docsTopics {
+		for _, ref := range topic.paths {
+			target := resolveRef(ref)
+			if (strings.HasSuffix(ref, "/") && isDir(target)) || fileExists(target) {
+				topics = append(topics, topic.topic+" ("+strings.Join(topic.paths, ", ")+")")
+				break
+			}
+		}
+	}
+	if len(topics) > 0 {
+		lines = append(lines, "- When asked about: "+strings.Join(topics, ", "))
+	}
+	if docsDir || examplesDir {
+		lines = append(lines, "- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing")
+	}
+	if len(topics) > 0 || dirHasEntries(docsDir, docsPath) || dirHasEntries(examplesDir, examplesPath) {
+		lines = append(lines, "- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)")
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):\n" + strings.Join(lines, "\n")
+}
+
+// isDir reports whether p exists and is a directory.
+func isDir(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.IsDir()
+}
+
+// dirHasEntries reports whether the (existing) directory p holds at least one
+// entry. exists false means false: the caller already knows the directory is
+// absent.
+func dirHasEntries(exists bool, p string) bool {
+	if !exists {
+		return false
+	}
+	entries, err := os.ReadDir(p)
+	return err == nil && len(entries) > 0
 }
 
 // SystemPromptState is the complete prompt state a set of options describes

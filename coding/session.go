@@ -648,6 +648,10 @@ func NewSession(opts SessionOptions) (*Session, error) {
 		Cwd:            cwd,
 		ContextFiles:   LoadProjectContextFiles(cwd),
 		Skills:         sessionSkills(cwd, opts.TrustProject),
+		// Deviation from upstream: advertise only documentation that actually
+		// exists where this binary runs, so the prompt never sends the model
+		// after files this checkout does not carry (see VerifyDocPaths).
+		VerifyDocPaths: true,
 	})
 	thinking := opts.ThinkingLevel
 	if thinking == "" {
@@ -1062,7 +1066,15 @@ func nowMillisCoding() int64 { return time.Now().UnixMilli() }
 // final assistant text. Tool activity is rendered as compact status lines.
 func (s *Session) RunPrint(ctx context.Context, w io.Writer, prompt string) (string, error) {
 	var lastTextLen int
+
+	// 1. Create a channel to signal completion
+	done := make(chan struct{})
+
 	unsub := s.Agent.Subscribe(func(ctx context.Context, e agent.AgentEvent) error {
+		// 2. Signal done when the agent loop actually finishes
+		if e.Type == agent.EvAgentEnd {
+			close(done)
+		}
 		switch e.Type {
 		case agent.EvMessageUpdate:
 			if e.AssistantMessageEvent != nil && e.AssistantMessageEvent.Type == ai.EventTextDelta {
@@ -1091,6 +1103,14 @@ func (s *Session) RunPrint(ctx context.Context, w io.Writer, prompt string) (str
 	if err := s.Agent.PromptMessages(ctx, prompts); err != nil {
 		return "", err
 	}
+
+	// 3. WAIT for the agent to finish all tool calls and the final response
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+
 	st := s.Agent.State()
 	if st.ErrorMessage != "" {
 		return "", fmt.Errorf("%s", st.ErrorMessage)

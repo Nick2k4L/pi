@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -170,6 +171,28 @@ func TestSessionDeclaresPromptAcrossTurnsLikePi(t *testing.T) {
 	for _, scenario := range loadSessionPromptCapture(t).Sessions {
 		t.Run(scenario.Name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
+			// The capture was made from a complete pi package (its
+			// PI_PACKAGE_DIR=/pkg), whose docs section therefore always
+			// carries every topic. The session verifies doc existence
+			// (VerifyDocPaths), so restore upstream conditions with a fixture
+			// holding the full documentation set; only section names are
+			// compared, so the fixture paths never reach the expectation.
+			pkg := t.TempDir()
+			for _, ref := range []string{
+				"README.md",
+				"docs/extensions.md", "docs/themes.md", "docs/skills.md", "docs/prompt-templates.md",
+				"docs/tui.md", "docs/keybindings.md", "docs/sdk.md", "docs/custom-provider.md",
+				"docs/models.md", "docs/packages.md", "docs/environment-variables.md", "docs/mcp.md",
+				"docs/codemode.md", "examples/extensions/readme.md",
+			} {
+				if err := os.MkdirAll(filepath.Dir(filepath.Join(pkg, ref)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(pkg, ref), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PI_PACKAGE_DIR", pkg)
 			reg := providers.RegisterFauxProvider(providers.RegisterFauxProviderOptions{
 				Models: []providers.FauxModelDefinition{{ID: "faux-1", Reasoning: true}, {ID: "faux-2", Reasoning: true}},
 			})

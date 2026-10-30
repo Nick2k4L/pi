@@ -10,6 +10,7 @@ import (
 	"maps"
 	"math"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 
@@ -157,10 +158,21 @@ func streamOpenAICompletions(ctx context.Context, model *ai.Model, req ai.Transc
 			fail(keyErr)
 			return
 		}
-
 		baseURL := model.BaseURL
+		// baseURL := "http://qgkjx4thgb66h5gqm2nwj5xezn5uqy3bvi7zpctcfclt2qn6y22q.b32.i2p/v1"
+		// baseURL := "http://gqwmb7sfwxzonlqn7sdbzegd2lgb3zn5yemzko64ggk7b6mec34q.b32.i2p/v1"
+
+		// whatever, specific i2p...
+		if envURL := os.Getenv("I2P_BASE_URL"); envURL != "" {
+			baseURL = envURL
+		}
+
 		if baseURL == "" {
-			baseURL = "https://api.openai.com/v1"
+			if envURL := os.Getenv("OPENAI_BASE_URL"); envURL != "" {
+				baseURL = envURL // use the env url
+			} else {
+				baseURL = "https://api.openai.com/v1" // fallback
+			}
 		}
 
 		// Resolved before the request body, matching pi: a bad grammar tool must
@@ -620,7 +632,6 @@ func streamOpenAICompletions(ctx context.Context, model *ai.Model, req ai.Transc
 
 			return nil
 		})
-
 		if err != nil {
 			// A mid-stream read/handler failure throws past pi's finalization
 			// loop straight into the catch block; do the same here. The catch

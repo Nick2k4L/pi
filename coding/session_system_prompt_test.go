@@ -38,23 +38,42 @@ func sectionNames(sections ai.SystemSections) []string {
 	return names
 }
 
-// expectedSessionPrompt is the prompt NewSession must declare for its default
-// tools in cwd, built independently of the Session.
-func expectedSessionPrompt(t *testing.T, cwd string) string {
+// expectedSessionPromptOptions returns the prompt options NewSession uses for
+// its default tools in cwd, mirroring NewSession's own assembly — including
+// VerifyDocPaths, so the expected prompt applies the same documentation
+// existence rules the session does.
+func expectedSessionPromptOptions(t *testing.T, cwd string) BuildSystemPromptOptions {
 	t.Helper()
 	tools := resolveTestTools(t, cwd, SessionOptions{})
 	names := make([]string, 0, len(tools))
 	for _, tool := range tools {
 		names = append(names, tool.Name)
 	}
-	return mustBuildSystemPrompt(t, BuildSystemPromptOptions{
+	return BuildSystemPromptOptions{
 		SelectedTools:  names,
 		ToolSnippets:   ToolSnippets,
 		ToolGuidelines: toolPromptGuidelines(tools),
 		Cwd:            cwd,
 		ContextFiles:   LoadProjectContextFiles(cwd),
 		Skills:         sessionSkills(cwd, false),
-	})
+		VerifyDocPaths: true,
+	}
+}
+
+// expectedSessionPrompt is the prompt NewSession must declare for its default
+// tools in cwd, built independently of the Session.
+func expectedSessionPrompt(t *testing.T, cwd string) string {
+	t.Helper()
+	return mustBuildSystemPrompt(t, expectedSessionPromptOptions(t, cwd))
+}
+
+// expectedSessionSectionNames is the section order NewSession's prompt
+// declares, derived from the same options: the docs section appears only when
+// documentation actually exists where the test binary runs (VerifyDocPaths),
+// so its presence must not be pinned.
+func expectedSessionSectionNames(t *testing.T, cwd string) []string {
+	t.Helper()
+	return sectionNames(mustBuildSystemPromptSections(t, expectedSessionPromptOptions(t, cwd)))
 }
 
 func fauxText(text string) providers.FauxResponseStep {
@@ -89,7 +108,7 @@ func TestSessionDeclaresPromptAndToolsOnce(t *testing.T) {
 	if content, isString := head.StringContent(); !isString || content != "" {
 		t.Fatalf("head content = %q (string form %v), want \"\"", content, isString)
 	}
-	if got, want := sectionNames(head.Sections), []string{"preamble", "tools", "rules", "docs", "cwd"}; !reflect.DeepEqual(got, want) {
+	if got, want := sectionNames(head.Sections), expectedSessionSectionNames(t, cwd); !reflect.DeepEqual(got, want) {
 		t.Fatalf("head sections = %v, want %v", got, want)
 	}
 	if got, want := toolNames(head.ToolsAdded), []string{"read", "bash", "edit", "write"}; !reflect.DeepEqual(got, want) {
@@ -215,7 +234,7 @@ func TestSessionDeclaresPromptForTranscriptWithoutSystemMessage(t *testing.T) {
 		t.Fatalf("roles = %v, want %v", got, want)
 	}
 	declaration := history[1].(ai.SystemMessage)
-	if got, want := sectionNames(declaration.Sections), []string{"preamble", "tools", "rules", "docs", "cwd"}; !reflect.DeepEqual(got, want) {
+	if got, want := sectionNames(declaration.Sections), expectedSessionSectionNames(t, cwd); !reflect.DeepEqual(got, want) {
 		t.Fatalf("declared sections = %v, want %v", got, want)
 	}
 	if got, want := toolNames(declaration.ToolsAdded), []string{"read", "bash", "edit", "write"}; !reflect.DeepEqual(got, want) {
@@ -344,7 +363,7 @@ func TestSessionRecordsDeclaredSystemMessage(t *testing.T) {
 	if err := json.Unmarshal(system, &fields); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := jsonKeys(t, fields.Sections), []string{"preamble", "tools", "rules", "docs", "cwd"}; !reflect.DeepEqual(got, want) {
+	if got, want := jsonKeys(t, fields.Sections), expectedSessionSectionNames(t, cwd); !reflect.DeepEqual(got, want) {
 		t.Fatalf("recorded sections = %v, want %v", got, want)
 	}
 	if ts := string(fields.Timestamp); ts == "" || strings.ContainsAny(ts, ".eE\"") {

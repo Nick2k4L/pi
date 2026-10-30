@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-i2p/onramp"
 	"github.com/sky-valley/pi/ai"
 	"github.com/sky-valley/pi/internal/jstext"
 )
@@ -101,6 +102,28 @@ var (
 	clientCache = map[int]*http.Client{}
 )
 
+var (
+	garlicMu sync.Mutex
+	garlic   *onramp.Garlic
+)
+
+func getGarlic() (*onramp.Garlic, error) {
+	garlicMu.Lock()
+	defer garlicMu.Unlock()
+	if garlic != nil {
+		return garlic, nil
+	}
+	fmt.Printf("[I2P] Initializing Garlic session...\n")
+	g, err := onramp.NewGarlic("pi-agent", onramp.SAM_ADDR, onramp.OPT_HUGE)
+	if err != nil {
+		fmt.Printf("[I2P] Garlic init failed: %v\n", err)
+		return nil, err
+	}
+	fmt.Printf("[I2P] Garlic session initialized successfully\n")
+	garlic = g
+	return garlic, nil
+}
+
 // sharedClient returns an http.Client whose transport caps the time to first
 // response byte at timeoutMs (ResponseHeaderTimeout). It deliberately leaves the
 // streaming body read uncapped so long SSE responses are not severed.
@@ -110,6 +133,7 @@ func sharedClient(timeoutMs int) *http.Client {
 	if c, ok := clientCache[timeoutMs]; ok {
 		return c
 	}
+	g, _ := getGarlic()
 	var tr *http.Transport
 	if base, ok := http.DefaultTransport.(*http.Transport); ok {
 		tr = base.Clone()
@@ -118,22 +142,64 @@ func sharedClient(timeoutMs int) *http.Client {
 		// by instrumentation); fall back to a fresh transport mirroring Go's
 		// defaults instead of dereferencing a nil from the failed assertion.
 		tr = &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			ForceAttemptHTTP2:     true,
+			Proxy:                 http.ProxyFromEnvironment,
+			ForceAttemptHTTP2:     false,
 			MaxIdleConns:          100,
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 		}
 	}
-	tr.ResponseHeaderTimeout = time.Duration(timeoutMs) * time.Millisecond
+	tr.ForceAttemptHTTP2 = false
+	tr.DisableKeepAlives = true
+	tr.WriteBufferSize = 64 * 1024
+	tr.ReadBufferSize = 64 * 1024
+	tr.MaxIdleConnsPerHost = 1
+	tr.DialContext = i2pDialContext(g)
+	// tr.ResponseHeaderTimeout = time.Duration(timeoutMs) * time.Millisecond
 	c := &http.Client{Transport: tr}
 	clientCache[timeoutMs] = c
 	return c
+}
+
+// i2pDialContext returns the transport dialer sharedClient installs. i2p
+// addresses are routed through the Garlic session: onramp's plain Dial is
+// the only entry point that resolves base32 names (a SAM NAMING LOOKUP)
+// before connecting — its context-aware twin returns a NullConn, a
+// net.Conn whose Read and Write do nothing, for any address not containing
+// ".i2p", and even with the suffix intact it rejects base32 names, because
+// i2pkeys.NewI2PAddrFromString cannot convert ".b32.i2p" to a destination.
+// The address is passed as net/http gave it, port included; the library
+// strips the port itself. Every other address dials directly.
+func i2pDialContext(g *onramp.Garlic) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		fmt.Printf("[I2P] Dialing %s\n", addr)
+		if g != nil && strings.Contains(addr, ".i2p") {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			conn, err := g.Dial(network, addr)
+			if err != nil {
+				fmt.Printf("[I2P] Garlic dial: %v\n", addr, err)
+				return nil, err
+			}
+			fmt.Printf("[I2P] Garlic dial successful\n")
+			return conn, nil
+			// return &deadlineConn{Conn: conn, timeout: 30 * time.Second}, nil
+			// return conn, nil
+		}
+		fmt.Printf("[I2P] Using standard dialer for %s\n", addr)
+		conn, err := (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return conn, nil
+		// return &deadlineConn{Conn: conn, timeout: 30 * time.Second}, nil
+		// return conn, nil
+	}
 }
 
 // shouldRetryResponse implements the openai SDK retry matrix (which pi
@@ -259,8 +325,8 @@ func isFinite(f float64) bool { return !math.IsInf(f, 0) && !math.IsNaN(f) }
 // `providerErrorMessage: string` parameter pi passes.
 //
 // errServerRetryDelayTooLong wraps the result so the agent-level retry policy
-// this defers to can recognize the condition; pi throws a plain Error, but
-// string-matching is not an API.
+// this defers to can recognize the condition without string-matching, while Error()
+// stays byte-identical to pi.
 func validateServerRetryDelay(delayMs float64, maxRetryDelayMs int, providerMsg string) error {
 	if maxRetryDelayMs <= 0 || delayMs <= float64(maxRetryDelayMs) {
 		return nil
@@ -633,6 +699,7 @@ func sendWithRetry(ctx context.Context, build func() (*http.Request, error), cfg
 			resp, err = client.Do(req)
 		}
 		if err != nil {
+			fmt.Printf("[DEBUG] Raw client.Do error: %v\\n", err)
 			if aborted() {
 				return nil, errRequestAborted
 			}

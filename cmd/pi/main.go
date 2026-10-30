@@ -50,7 +50,8 @@ func requireProviderAuth(provider string) error {
 	case "cloudflare-ai-gateway":
 		return fmt.Errorf("no credentials found for provider %q (set CLOUDFLARE_API_KEY, CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_GATEWAY_ID)", provider)
 	}
-	return fmt.Errorf("no credentials found for provider %q (set the appropriate *_API_KEY env var)", provider)
+	// I set this to null for custom providers at the moment...
+	return nil
 }
 
 // newSession builds the CLI's session. It holds no key, and has no model
