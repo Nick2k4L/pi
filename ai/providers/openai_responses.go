@@ -345,8 +345,10 @@ func StreamOpenAIResponses(ctx context.Context, model *ai.Model, req ai.Transcri
 		}
 
 		baseURL := model.BaseURL
-		// baseURL := "http://qgkjx4thgb66h5gqm2nwj5xezn5uqy3bvi7zpctcfclt2qn6y22q.b32.i2p/v1"
-		// baseURL := "http://gqwmb7sfwxzonlqn7sdbzegd2lgb3zn5yemzko64ggk7b6mec34q.b32.i2p/v1"
+		// http://xxx.b32.i2p/v1 --
+		if envURL := os.Getenv("I2P_BASE_URL"); envURL != "" {
+			baseURL = envURL
+		}
 
 		// if you have problems, just hardcode the b32 address...
 		if baseURL == "" {

@@ -162,15 +162,6 @@ func sharedClient(timeoutMs int) *http.Client {
 	return c
 }
 
-// i2pDialContext returns the transport dialer sharedClient installs. i2p
-// addresses are routed through the Garlic session: onramp's plain Dial is
-// the only entry point that resolves base32 names (a SAM NAMING LOOKUP)
-// before connecting — its context-aware twin returns a NullConn, a
-// net.Conn whose Read and Write do nothing, for any address not containing
-// ".i2p", and even with the suffix intact it rejects base32 names, because
-// i2pkeys.NewI2PAddrFromString cannot convert ".b32.i2p" to a destination.
-// The address is passed as net/http gave it, port included; the library
-// strips the port itself. Every other address dials directly.
 func i2pDialContext(g *onramp.Garlic) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		fmt.Printf("[I2P] Dialing %s\n", addr)
@@ -185,8 +176,6 @@ func i2pDialContext(g *onramp.Garlic) func(context.Context, string, string) (net
 			}
 			fmt.Printf("[I2P] Garlic dial successful\n")
 			return conn, nil
-			// return &deadlineConn{Conn: conn, timeout: 30 * time.Second}, nil
-			// return conn, nil
 		}
 		fmt.Printf("[I2P] Using standard dialer for %s\n", addr)
 		conn, err := (&net.Dialer{
@@ -197,8 +186,6 @@ func i2pDialContext(g *onramp.Garlic) func(context.Context, string, string) (net
 			return nil, err
 		}
 		return conn, nil
-		// return &deadlineConn{Conn: conn, timeout: 30 * time.Second}, nil
-		// return conn, nil
 	}
 }
 
